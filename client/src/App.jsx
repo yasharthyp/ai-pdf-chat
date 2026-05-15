@@ -22,7 +22,7 @@ export default function App() {
 
     try {
       await axios.post(
-        "http://localhost:5000/upload",
+        "https://ai-pdf-chat-backend.onrender.com/upload",
         formData
       );
 
@@ -57,7 +57,7 @@ export default function App() {
 
     try {
       const response = await axios.post(
-        "http://localhost:5000/chat",
+        "https://ai-pdf-chat-backend.onrender.com/chat",
         {
           question: userQuestion,
         }
