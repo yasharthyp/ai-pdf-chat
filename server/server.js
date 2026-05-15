@@ -18,17 +18,9 @@ const groq = new Groq({
 app.use(cors());
 app.use(express.json());
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "uploads/");
-  },
-
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + "-" + file.originalname);
-  },
+const upload = multer({
+  storage: multer.memoryStorage(),
 });
-
-const upload = multer({ storage });
 
 let vectorStore = [];
 
@@ -76,9 +68,7 @@ app.post("/upload", upload.single("pdf"), async (req, res) => {
       });
     }
 
-    const filePath = req.file.path;
-
-    const dataBuffer = fs.readFileSync(filePath);
+    const dataBuffer = req.file.buffer;
 
     const parser = new PDFParse({ data: dataBuffer });
     const pdfData = await parser.getText();
