@@ -8,6 +8,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const Groq = require("groq-sdk");
 
 const app = express();
+const PORT = process.env.PORT || 5000;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const groq = new Groq({
@@ -60,6 +61,10 @@ function cosineSimilarity(vecA, vecB) {
 
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
+
+app.get("/", (req, res) => {
+  res.send("Backend Running");
+});
 
 app.post("/upload", upload.single("pdf"), async (req, res) => {
   try {
@@ -159,6 +164,6 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-app.listen(5000, () => {
-  console.log("Server running on port 5000");
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
