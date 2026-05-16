@@ -1,6 +1,9 @@
 import { useState } from "react";
 import axios from "axios";
 
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "https://ai-pdf-chat-backend.onrender.com";
+
 export default function App() {
   const [pdf, setPdf] = useState(null);
   const [question, setQuestion] = useState("");
@@ -18,13 +21,14 @@ export default function App() {
     }
 
     const formData = new FormData();
-    formData.append("pdf", pdf);
+    formData.append("pdf", pdf, pdf.name);
 
     try {
-      await axios.post(
-        "https://ai-pdf-chat-backend.onrender.com/upload",
-        formData
-      );
+      await axios.post(`${API_BASE_URL}/upload`, formData, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
 
       setMessages((prev) => [
         ...prev,
@@ -35,6 +39,17 @@ export default function App() {
       ]);
     } catch (error) {
       console.error(error);
+
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const message =
+          error.response?.data?.message ||
+          error.response?.data?.error ||
+          error.message;
+
+        alert(`Upload failed (${status ?? "unknown"}): ${message}`);
+        return;
+      }
 
       alert("Upload failed");
     }
@@ -57,7 +72,7 @@ export default function App() {
 
     try {
       const response = await axios.post(
-        "https://ai-pdf-chat-backend.onrender.com/chat",
+        `${API_BASE_URL}/chat`,
         {
           question: userQuestion,
         }

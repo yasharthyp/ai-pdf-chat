@@ -5,15 +5,51 @@ const multer = require("multer");
 const fs = require("fs");
 const { PDFParse } = require("pdf-parse");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { v1: DocumentAI } = require("@google-cloud/documentai");
 const Groq = require("groq-sdk");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const DOC_AI_PROJECT_ID = process.env.DOC_AI_PROJECT_ID;
+const DOC_AI_LOCATION = process.env.DOC_AI_LOCATION || "us";
+const DOC_AI_PROCESSOR_ID = process.env.DOC_AI_PROCESSOR_ID;
+const DOC_AI_CREDENTIALS_JSON = process.env.DOC_AI_CREDENTIALS_JSON;
+const OCR_TEXT_THRESHOLD = Number(process.env.OCR_TEXT_THRESHOLD || 200);
+
+if (!GEMINI_API_KEY) {
+  throw new Error(
+    "Missing Gemini API key. Set GEMINI_API_KEY (or GOOGLE_API_KEY) in environment variables."
+  );
+}
+
+if (!GROQ_API_KEY) {
+  throw new Error("Missing GROQ_API_KEY in environment variables.");
+}
+
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
+  apiKey: GROQ_API_KEY,
 });
+
+const isDocAIConfigured = Boolean(DOC_AI_PROJECT_ID && DOC_AI_PROCESSOR_ID);
+let docAIClient = null;
+
+if (isDocAIConfigured) {
+  const clientOptions = {};
+
+  if (DOC_AI_CREDENTIALS_JSON) {
+    try {
+      clientOptions.credentials = JSON.parse(DOC_AI_CREDENTIALS_JSON);
+    } catch (error) {
+      throw new Error("DOC_AI_CREDENTIALS_JSON is not valid JSON.");
+    }
+  }
+
+  docAIClient = new DocumentAI.DocumentProcessorServiceClient(clientOptions);
+}
 
 app.use(cors());
 app.use(express.json());
@@ -24,10 +60,77 @@ const upload = multer({
 
 let vectorStore = [];
 
+function isInvalidGeminiKeyError(error) {
+  if (error?.errorDetails?.some((detail) => detail?.reason === "API_KEY_INVALID")) {
+    return true;
+  }
+
+  const message = String(error?.message || "").toLowerCase();
+  return message.includes("api_key_invalid") || message.includes("api key not valid");
+}
+
 async function createEmbedding(text) {
-  const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
-  const result = await model.embedContent(text);
-  return result.embedding.values;
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
+    const result = await model.embedContent(text);
+    return result.embedding.values;
+  } catch (error) {
+    if (isInvalidGeminiKeyError(error)) {
+      const authError = new Error(
+        "Gemini API key is invalid. Generate a new key in Google AI Studio and set GEMINI_API_KEY in Render/local env."
+      );
+      authError.statusCode = 401;
+      throw authError;
+    }
+
+    throw error;
+  }
+}
+
+function mergeExtractedText(parsedText, ocrText) {
+  const safeParsedText = String(parsedText || "").trim();
+  const safeOcrText = String(ocrText || "").trim();
+
+  if (!safeParsedText) {
+    return safeOcrText;
+  }
+
+  if (!safeOcrText) {
+    return safeParsedText;
+  }
+
+  if (safeParsedText.includes(safeOcrText)) {
+    return safeParsedText;
+  }
+
+  if (safeOcrText.includes(safeParsedText)) {
+    return safeOcrText;
+  }
+
+  return `${safeParsedText}\n\n${safeOcrText}`;
+}
+
+async function extractTextWithDocumentAI(pdfBuffer) {
+  if (!docAIClient) {
+    return "";
+  }
+
+  const processorPath = `projects/${DOC_AI_PROJECT_ID}/locations/${DOC_AI_LOCATION}/processors/${DOC_AI_PROCESSOR_ID}`;
+
+  try {
+    const [result] = await docAIClient.processDocument({
+      name: processorPath,
+      rawDocument: {
+        content: pdfBuffer.toString("base64"),
+        mimeType: "application/pdf",
+      },
+    });
+
+    return String(result?.document?.text || "").trim();
+  } catch (error) {
+    console.error("Document AI OCR failed", error?.message || error);
+    return "";
+  }
 }
 
 function chunkText(text, chunkSize = 1000) {
@@ -60,7 +163,7 @@ app.get("/", (req, res) => {
 
 app.post("/upload", upload.single("pdf"), async (req, res) => {
   try {
-    console.log(req.file);
+    console.log(`Upload received: ${req.file?.originalname || "unknown file"}`);
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -72,8 +175,24 @@ app.post("/upload", upload.single("pdf"), async (req, res) => {
 
     const parser = new PDFParse({ data: dataBuffer });
     const pdfData = await parser.getText();
+    const parsedText = String(pdfData?.text || "").trim();
 
-    const chunks = chunkText(pdfData.text);
+    let ocrText = "";
+    if (parsedText.length < OCR_TEXT_THRESHOLD) {
+      ocrText = await extractTextWithDocumentAI(dataBuffer);
+    }
+
+    const fullText = mergeExtractedText(parsedText, ocrText);
+
+    if (!fullText) {
+      return res.status(422).json({
+        success: false,
+        message:
+          "Could not extract readable text from this PDF. For scanned files, configure Document AI OCR env vars.",
+      });
+    }
+
+    const chunks = chunkText(fullText).filter((chunk) => chunk.trim().length > 0);
 
     vectorStore = [];
 
@@ -89,15 +208,22 @@ app.post("/upload", upload.single("pdf"), async (req, res) => {
     res.json({
       success: true,
       totalChunks: vectorStore.length,
+      extraction: {
+        parsedTextLength: parsedText.length,
+        ocrUsed: Boolean(ocrText),
+        ocrTextLength: ocrText.length,
+      },
     });
-  }catch (error) {
-  console.error(error);
+  } catch (error) {
+    console.error(error);
 
-  res.status(500).json({
-    success: false,
-    error: error.message,
-  });
-}
+    const statusCode = error?.statusCode || 500;
+    res.status(statusCode).json({
+      success: false,
+      message: error.message,
+      error: error.message,
+    });
+  }
 });
 
 app.post("/chat", async (req, res) => {
@@ -147,8 +273,10 @@ app.post("/chat", async (req, res) => {
   } catch (error) {
     console.error(error);
 
-    res.status(500).json({
+    const statusCode = error?.statusCode || 500;
+    res.status(statusCode).json({
       success: false,
+      message: error.message,
       error: error.message,
     });
   }
